@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+#
+# setup-vps - prepare a fresh Ubuntu/Debian VPS
+#
+#   1. Update the system
+#   2. Install basic tools (any tool that fails is skipped)
+#   3. Configure ~/.bashrc and ~/.vimrc
+#   4. Install Docker and make sure it is running
+#   5. Print a summary of what was done
+#
+# Usage:
+#   chmod +x setup-vps
+#   ./setup-vps
+
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
+if [[ -t 1 ]]; then
+  RED=$'\e[31m'; GREEN=$'\e[32m'; YELLOW=$'\e[33m'; BLUE=$'\e[34m'
+  BOLD=$'\e[1m'; RESET=$'\e[0m'
+else
+  RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""; RESET=""
+fi
+
+header() { echo; echo "${BOLD}${BLUE}========== $* ==========${RESET}"; }
+info()   { echo "${BLUE}[ .. ]${RESET} $*"; }
+ok()     { echo "${GREEN}[ OK ]${RESET} $*"; }
+warn()   { echo "${YELLOW}[WARN]${RESET} $*"; }
+fail()   { echo "${RED}[FAIL]${RESET} $*"; }
+
+# run "description" command [args...]
+# Shows what is happening, runs the command, then shows OK or FAIL.
+run() {
+  local desc="$1"; shift
+  info "$desc ..."
+  if "$@"; then
+    ok "$desc"
+    return 0
+  else
+    local code=$?
+    fail "$desc (exit code $code)"
+    return "$code"
+  fi
+}
+
+# Summary table: each entry is "step name|status"
+SUMMARY=()
+record() { SUMMARY+=("$1|$2"); }
+
+# ---------------------------------------------------------------------------
+# Pre-checks
+# ---------------------------------------------------------------------------
+if [[ "$(uname -s)" != "Linux" ]] || ! command -v apt-get >/dev/null 2>&1; then
+  fail "This script needs a Debian/Ubuntu Linux system with apt."
+  exit 1
+fi
+
+# Use sudo only when not already root
+if [[ $EUID -eq 0 ]]; then
+  SUDO=()
+else
+  if ! command -v sudo >/dev/null 2>&1; then
+    fail "sudo is not installed. Run this script as root instead."
+    exit 1
+  fi
+  SUDO=(sudo)
+fi
+
+# Whose ~/.bashrc and ~/.vimrc to edit (the real user, even under sudo)
+TARGET_USER="${SUDO_USER:-$(id -un)}"
+TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+[[ -z "$TARGET_HOME" ]] && TARGET_HOME="$HOME"
+
+# apt-get without questions; keep existing config files on upgrade
+apt_get() {
+  "${SUDO[@]}" env DEBIAN_FRONTEND=noninteractive apt-get -y \
+    -o Dpkg::Options::=--force-confdef \
+    -o Dpkg::Options::=--force-confold \
+    "$@"
+}
+
+# Ask for the sudo password once, then keep sudo alive until the script ends
+if [[ ${#SUDO[@]} -gt 0 ]]; then
+  header "Checking sudo access"
+  info "You may be asked for your password."
+  if ! sudo -v; then
+    fail "Could not get sudo access. Exiting."
+    exit 1
+  fi
+  ok "sudo access granted"
+  ( while kill -0 "$$" 2>/dev/null; do sudo -n true; sleep 50; done ) 2>/dev/null &
+  SUDO_KEEPALIVE_PID=$!
+  trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null' EXIT
+fi
+
+# ---------------------------------------------------------------------------
+# Step 1: Update the system
+# ---------------------------------------------------------------------------
+step_update() {
+  header "Step 1/4: Updating the system"
+  run "apt update"       apt_get update       || return 1
+  run "apt upgrade"      apt_get upgrade      || return 1
+  run "apt full-upgrade" apt_get full-upgrade || return 1
+  run "apt autoremove"   apt_get autoremove   || return 1
+}
+
+# ---------------------------------------------------------------------------
+# Step 2: Install tools (skip any that are missing or fail)
+# ---------------------------------------------------------------------------
+TOOLS=(curl wget unzip git htop neofetch ufw vim)
+TOOLS_INSTALLED=()
+TOOLS_ALREADY=()
+TOOLS_SKIPPED=()
+
+is_installed() {
+  dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
+}
+
+step_tools() {
+  header "Step 2/4: Installing tools"
+  local t
+  for t in "${TOOLS[@]}"; do
+    if is_installed "$t"; then
+      ok "$t is already installed"
+      TOOLS_ALREADY+=("$t")
+      continue
+    fi
+    if ! apt-cache show "$t" >/dev/null 2>&1; then
+      warn "$t: package not found, skipping"
+      TOOLS_SKIPPED+=("$t (not found)")
+      continue
+    fi
+    if run "Installing $t" apt_get install "$t"; then
+      TOOLS_INSTALLED+=("$t")
+    else
+      warn "$t: install failed, skipping"
+      TOOLS_SKIPPED+=("$t (install error)")
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Step 3: Configure ~/.bashrc and ~/.vimrc
+# ---------------------------------------------------------------------------
+# Add a line to a file only if it is not already there
+add_line() {
+  local file="$1" line="$2"
+  if grep -qxF "$line" "$file" 2>/dev/null; then
+    ok "Already in $(basename "$file"): $line"
+  else
+    echo "$line" >> "$file" && ok "Added to $(basename "$file"): $line"
+  fi
+}
+
+step_config() {
+  header "Step 3/4: Configuring .bashrc and .vimrc"
+  local bashrc="$TARGET_HOME/.bashrc"
+  local vimrc="$TARGET_HOME/.vimrc"
+
+  info "Writing aliases to $bashrc"
+  touch "$bashrc" || return 1
+  add_line "$bashrc" '# Added by setup-vps'
+  add_line "$bashrc" 'alias c="clear"'
+  add_line "$bashrc" 'alias update="sudo apt update && sudo apt upgrade && sudo apt full-upgrade && sudo apt autoremove"'
+
+  info "Writing settings to $vimrc"
+  touch "$vimrc" || return 1
+  add_line "$vimrc" 'set number'
+  add_line "$vimrc" 'syntax on'
+
+  # If run with sudo, give the files back to the real user
+  if [[ $EUID -eq 0 && -n "$SUDO_USER" ]]; then
+    chown "$TARGET_USER": "$bashrc" "$vimrc"
+  fi
+
+  info "Reloading $bashrc"
+  # shellcheck disable=SC1090
+  source "$bashrc" >/dev/null 2>&1 || true
+  ok "bashrc saved and reloaded"
+}
+
+# ---------------------------------------------------------------------------
+# Step 4: Install Docker
+# ---------------------------------------------------------------------------
+DOCKER_DISTRO=""
+
+detect_docker_distro() {
+  local id id_like
+  id="$(. /etc/os-release && echo "$ID")"
+  id_like="$(. /etc/os-release && echo "${ID_LIKE:-}")"
+  case "$id" in
+    ubuntu) DOCKER_DISTRO=ubuntu ;;
+    debian) DOCKER_DISTRO=debian ;;
+    *)
+      if   [[ "$id_like" == *ubuntu* ]]; then DOCKER_DISTRO=ubuntu
+      elif [[ "$id_like" == *debian* ]]; then DOCKER_DISTRO=debian
+      else return 1
+      fi
+      ;;
+  esac
+}
+
+docker_add_repo() {
+  info "4.1 Adding Docker's official repository"
+  run "Installing ca-certificates and curl" apt_get install ca-certificates curl || return 1
+  run "Creating /etc/apt/keyrings" "${SUDO[@]}" install -m 0755 -d /etc/apt/keyrings || return 1
+  run "Downloading Docker GPG key" \
+    "${SUDO[@]}" curl -fsSL "https://download.docker.com/linux/$DOCKER_DISTRO/gpg" \
+    -o /etc/apt/keyrings/docker.asc || return 1
+  run "Setting key permissions" "${SUDO[@]}" chmod a+r /etc/apt/keyrings/docker.asc || return 1
+
+  local codename arch
+  codename="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")"
+  arch="$(dpkg --print-architecture)"
+
+  info "Writing /etc/apt/sources.list.d/docker.sources ($DOCKER_DISTRO $codename $arch)"
+  if "${SUDO[@]}" tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/$DOCKER_DISTRO
+Suites: $codename
+Components: stable
+Architectures: $arch
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+  then
+    ok "Docker repository added"
+  else
+    fail "Could not write Docker repository file"
+    return 1
+  fi
+
+  run "apt update" apt_get update || return 1
+}
+
+docker_install() {
+  info "4.2 Installing Docker packages"
+  run "Installing docker-ce, cli, containerd, buildx, compose" \
+    apt_get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+}
+
+docker_check() {
+  info "4.3 Checking Docker service"
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "systemctl not found, cannot check the Docker service"
+    return 1
+  fi
+  if systemctl is-active --quiet docker; then
+    ok "Docker is already running"
+  else
+    warn "Docker is not running, starting it"
+    run "Starting Docker" "${SUDO[@]}" systemctl start docker || return 1
+  fi
+  "${SUDO[@]}" systemctl status docker --no-pager --lines=5 || true
+  systemctl is-active --quiet docker
+}
+
+step_docker() {
+  header "Step 4/4: Installing Docker"
+  if ! detect_docker_distro; then
+    fail "Docker setup supports Ubuntu/Debian only. Skipping."
+    record "4. Docker" "FAILED (unsupported OS)"
+    return 1
+  fi
+  ok "Detected system type: $DOCKER_DISTRO"
+
+  if ! docker_add_repo; then
+    record "4.1 Docker repository" "FAILED"
+    record "4.2 Docker install" "SKIPPED"
+    record "4.3 Docker service" "SKIPPED"
+    return 1
+  fi
+  record "4.1 Docker repository" "OK"
+
+  if ! docker_install; then
+    record "4.2 Docker install" "FAILED"
+    record "4.3 Docker service" "SKIPPED"
+    return 1
+  fi
+  record "4.2 Docker install" "OK"
+
+  if docker_check; then
+    record "4.3 Docker service" "OK (running)"
+  else
+    record "4.3 Docker service" "FAILED"
+    return 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+print_summary() {
+  header "Summary"
+  local entry name status color
+  for entry in "${SUMMARY[@]}"; do
+    name="${entry%%|*}"
+    status="${entry#*|}"
+    case "$status" in
+      OK*)      color="$GREEN" ;;
+      WARNING*) color="$YELLOW" ;;
+      *)        color="$RED" ;;
+    esac
+    printf "  %-28s %s%s%s\n" "$name" "$color" "$status" "$RESET"
+  done
+
+  echo
+  [[ ${#TOOLS_INSTALLED[@]} -gt 0 ]] && echo "  Tools installed:         ${TOOLS_INSTALLED[*]}"
+  [[ ${#TOOLS_ALREADY[@]}   -gt 0 ]] && echo "  Tools already installed: ${TOOLS_ALREADY[*]}"
+  [[ ${#TOOLS_SKIPPED[@]}   -gt 0 ]] && echo "  Tools skipped:           ${TOOLS_SKIPPED[*]}"
+
+  if command -v docker >/dev/null 2>&1; then
+    echo "  Docker version:          $(docker --version 2>/dev/null)"
+  fi
+
+  echo
+  echo "${BOLD}Note:${RESET} to use the new aliases (c, update) in this terminal, run:"
+  echo "    source ~/.bashrc"
+  echo "or log out and log back in."
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+EXIT_CODE=0
+
+if step_update; then
+  record "1. System update" "OK"
+else
+  record "1. System update" "FAILED"
+  record "2. Install tools" "SKIPPED"
+  record "3. bashrc / vimrc" "SKIPPED"
+  record "4. Docker" "SKIPPED"
+  fail "System update failed, stopping here."
+  print_summary
+  exit 1
+fi
+
+step_tools
+if [[ ${#TOOLS_SKIPPED[@]} -eq 0 ]]; then
+  record "2. Install tools" "OK"
+else
+  record "2. Install tools" "WARNING (${#TOOLS_SKIPPED[@]} skipped)"
+fi
+
+if step_config; then
+  record "3. bashrc / vimrc" "OK"
+else
+  record "3. bashrc / vimrc" "FAILED"
+  EXIT_CODE=1
+fi
+
+step_docker || EXIT_CODE=1
+
+print_summary
+exit "$EXIT_CODE"
