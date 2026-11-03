@@ -107,7 +107,7 @@ step_update() {
 # ---------------------------------------------------------------------------
 # Step 2: Install tools (skip any that are missing or fail)
 # ---------------------------------------------------------------------------
-TOOLS=(curl wget unzip git htop neofetch ufw vim)
+TOOLS=(curl wget unzip git htop neofetch ufw vim ca-certificates tmux)
 TOOLS_INSTALLED=()
 TOOLS_ALREADY=()
 TOOLS_SKIPPED=()
