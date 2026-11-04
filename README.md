@@ -5,7 +5,8 @@
 ## What it does
 
 1. Updates the system (`apt update`, `upgrade`, `full-upgrade`, `autoremove`)
-2. Installs basic tools: `curl`, `wget`, `unzip`, `git`, `htop`, `neofetch`, `ufw`, `vim`, `ca-certificates`, `tmux` (any tool that fails is skipped)
+2. Installs basic tools: `curl`, `wget`, `unzip`, `git`, `htop`, `neofetch`, `ufw`, `vim`, `ca-certificates`, `tmux`, `fail2ban` (any tool that fails is skipped)
+   - fail2ban is then enabled at boot, started, and its status is shown with `fail2ban-client status`
 3. Adds aliases to `~/.bashrc` (`c` = clear, `update` = full system update) and turns on line numbers and syntax highlighting in `~/.vimrc`
 4. Installs Docker from Docker's official repository and makes sure it is running
 5. Prints a summary of what worked, what was skipped and what failed

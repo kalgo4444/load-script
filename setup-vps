@@ -107,7 +107,7 @@ step_update() {
 # ---------------------------------------------------------------------------
 # Step 2: Install tools (skip any that are missing or fail)
 # ---------------------------------------------------------------------------
-TOOLS=(curl wget unzip git htop neofetch ufw vim ca-certificates tmux)
+TOOLS=(curl wget unzip git htop neofetch ufw vim ca-certificates tmux fail2ban)
 TOOLS_INSTALLED=()
 TOOLS_ALREADY=()
 TOOLS_SKIPPED=()
@@ -137,6 +137,25 @@ step_tools() {
       TOOLS_SKIPPED+=("$t (install error)")
     fi
   done
+}
+
+# Enable and start fail2ban, then show its status
+fail2ban_check() {
+  info "2.1 Setting up fail2ban service"
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "systemctl not found, cannot manage the fail2ban service"
+    return 1
+  fi
+  run "Enabling fail2ban" "${SUDO[@]}" systemctl enable fail2ban || return 1
+  run "Starting fail2ban" "${SUDO[@]}" systemctl start fail2ban  || return 1
+
+  # fail2ban needs a few seconds after start before the client can connect
+  local i
+  for i in {1..10}; do
+    "${SUDO[@]}" fail2ban-client ping >/dev/null 2>&1 && break
+    sleep 1
+  done
+  run "fail2ban status" "${SUDO[@]}" fail2ban-client status
 }
 
 # ---------------------------------------------------------------------------
@@ -340,6 +359,17 @@ if [[ ${#TOOLS_SKIPPED[@]} -eq 0 ]]; then
   record "2. Install tools" "OK"
 else
   record "2. Install tools" "WARNING (${#TOOLS_SKIPPED[@]} skipped)"
+fi
+
+if is_installed fail2ban; then
+  if fail2ban_check; then
+    record "2.1 fail2ban service" "OK (running)"
+  else
+    record "2.1 fail2ban service" "FAILED"
+    EXIT_CODE=1
+  fi
+else
+  record "2.1 fail2ban service" "SKIPPED (not installed)"
 fi
 
 if step_config; then
