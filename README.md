@@ -65,6 +65,24 @@ The script does not change SSH. Do this by hand after it finishes.
    | `PasswordAuthentication yes` | normal users may log in with a password |
    | `PubkeyAuthentication yes` | SSH key login is enabled |
 
+2. Turn on the firewall and keep SSH open:
+
+   ```bash
+   sudo ufw default deny incoming
+   sudo ufw default allow outgoing
+   sudo ufw allow OpenSSH
+   sudo ufw --force enable
+   ```
+
+   | Command | Meaning |
+   | --- | --- |
+   | `ufw default deny incoming` | block all incoming connections unless a rule allows them |
+   | `ufw default allow outgoing` | let the server connect out freely |
+   | `ufw allow OpenSSH` | allow SSH (port 22) so you are not locked out |
+   | `ufw --force enable` | turn the firewall on now and at boot, without asking to confirm |
+
+   > Run `ufw allow OpenSSH` before `ufw --force enable`, or you can lose SSH access. Check the rules with `sudo ufw status verbose`.
+
 ## Close Dokploy port 3000 (manual)
 
 Only for servers that run [Dokploy](https://dokploy.com). The script does not install it.
