@@ -6,7 +6,9 @@
 #   2. Install basic tools (any tool that fails is skipped)
 #   3. Configure ~/.bashrc and ~/.vimrc
 #   4. Install Docker and make sure it is running
-#   5. Print a summary of what was done
+#   5. Create a new user (asks for name and password) and add it to sudo
+#   6. Configure SSH via /etc/ssh/sshd_config.d/10-ttt.conf and restart it
+#   7. Print a summary of what was done
 #
 # Usage:
 #   chmod +x setup-vps
@@ -97,7 +99,7 @@ fi
 # Step 1: Update the system
 # ---------------------------------------------------------------------------
 step_update() {
-  header "Step 1/4: Updating the system"
+  header "Step 1/6: Updating the system"
   run "apt update"       apt_get update       || return 1
   run "apt upgrade"      apt_get upgrade      || return 1
   run "apt full-upgrade" apt_get full-upgrade || return 1
@@ -117,7 +119,7 @@ is_installed() {
 }
 
 step_tools() {
-  header "Step 2/4: Installing tools"
+  header "Step 2/6: Installing tools"
   local t
   for t in "${TOOLS[@]}"; do
     if is_installed "$t"; then
@@ -172,7 +174,7 @@ add_line() {
 }
 
 step_config() {
-  header "Step 3/4: Configuring .bashrc and .vimrc"
+  header "Step 3/6: Configuring .bashrc and .vimrc"
   local bashrc="$TARGET_HOME/.bashrc"
   local vimrc="$TARGET_HOME/.vimrc"
 
@@ -274,7 +276,7 @@ docker_check() {
 }
 
 step_docker() {
-  header "Step 4/4: Installing Docker"
+  header "Step 4/6: Installing Docker"
   if ! detect_docker_distro; then
     fail "Docker setup supports Ubuntu/Debian only. Skipping."
     record "4. Docker" "FAILED (unsupported OS)"
@@ -303,6 +305,168 @@ step_docker() {
     record "4.3 Docker service" "FAILED"
     return 1
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Step 5: Create a new user and add it to the sudo group
+# ---------------------------------------------------------------------------
+RESERVED_USERS=(root admin ubuntu daemon)
+NEW_USER=""
+
+# True if we can talk to the user through /dev/tty (works even under `curl | bash`)
+have_tty() { { : </dev/tty; } 2>/dev/null; }
+
+# Print the reason and return 1 if the name cannot be used
+valid_username() {
+  local name="$1" r
+  for r in "${RESERVED_USERS[@]}"; do
+    if [[ "$name" == "$r" ]]; then
+      warn "'$name' is a reserved name, choose another one"
+      return 1
+    fi
+  done
+  if [[ ! "$name" =~ ^[a-z][a-z0-9_-]{0,31}$ ]]; then
+    warn "'$name' is not valid: start with a letter, use only a-z 0-9 _ -, at most 32 characters"
+    return 1
+  fi
+  # Do not hand out system accounts such as nobody or www-data
+  # (normal users have UIDs 1000-60000, see UID_MIN/UID_MAX in /etc/login.defs)
+  local uid
+  if uid="$(id -u "$name" 2>/dev/null)" && { [[ $uid -lt 1000 ]] || [[ $uid -gt 60000 ]]; }; then
+    warn "'$name' is a system account, choose another one"
+    return 1
+  fi
+}
+
+# True if the user has a usable password (status P in `passwd -S`)
+has_password() {
+  [[ "$("${SUDO[@]}" passwd -S "$1" 2>/dev/null | awk '{print $2}')" == "P" ]]
+}
+
+step_user() {
+  header "Step 5/6: Creating a new user"
+  if ! have_tty; then
+    fail "No terminal available to ask for the user name and password"
+    return 1
+  fi
+
+  local name
+  while true; do
+    read -r -p "New user name [noname]: " name </dev/tty || return 1
+    name="${name:-noname}"
+    name="${name,,}"
+    valid_username "$name" && break
+  done
+  NEW_USER="$name"
+
+  if id "$name" >/dev/null 2>&1; then
+    ok "User $name already exists"
+  else
+    if ! is_installed adduser; then
+      run "Installing adduser" apt_get install adduser || return 1
+    fi
+    info "You will be asked for the password of $name."
+    run "Creating user $name" "${SUDO[@]}" adduser --gecos "" "$name" </dev/tty || return 1
+  fi
+
+  # Without a password the user could not log in over SSH with a password
+  if ! has_password "$name"; then
+    warn "User $name has no password yet"
+    run "Setting password for $name" "${SUDO[@]}" passwd "$name" </dev/tty || return 1
+  fi
+
+  if id -nG "$name" | tr ' ' '\n' | grep -qx sudo; then
+    ok "$name is already in the sudo group"
+  else
+    run "Adding $name to the sudo group" "${SUDO[@]}" usermod -aG sudo "$name" || return 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Step 6: Configure SSH (drop-in file, the main sshd_config is not changed)
+# ---------------------------------------------------------------------------
+SSHD_CONFIG=/etc/ssh/sshd_config
+SSHD_DROPIN=/etc/ssh/sshd_config.d/10-ttt.conf
+SSHD_BIN=/usr/sbin/sshd
+SSH_CONFIGURED=0
+
+step_ssh() {
+  header "Step 6/6: Configuring SSH"
+  if ! is_installed openssh-server; then
+    warn "openssh-server is not installed, skipping"
+    record "6. SSH config" "WARNING (openssh-server not installed)"
+    return 0
+  fi
+
+  # One-time backup of the original config
+  if [[ -e "$SSHD_CONFIG.bak" ]]; then
+    ok "Backup already exists: $SSHD_CONFIG.bak"
+  elif ! run "Backing up $SSHD_CONFIG" "${SUDO[@]}" cp -p "$SSHD_CONFIG" "$SSHD_CONFIG.bak"; then
+    record "6. SSH config" "FAILED (backup)"
+    return 1
+  fi
+
+  info "Writing $SSHD_DROPIN"
+  if "${SUDO[@]}" mkdir -p "$(dirname "$SSHD_DROPIN")" &&
+     "${SUDO[@]}" tee "$SSHD_DROPIN" >/dev/null <<'EOF'
+# Added by setup-vps
+# root may log in with an SSH key only, not with a password
+PermitRootLogin prohibit-password
+# normal users may log in with a password
+PasswordAuthentication yes
+# SSH key login is enabled
+PubkeyAuthentication yes
+EOF
+  then
+    ok "Wrote $SSHD_DROPIN"
+  else
+    fail "Could not write $SSHD_DROPIN"
+    record "6. SSH config" "FAILED (write)"
+    return 1
+  fi
+
+  # sshd -t / -T need this directory, which may be missing while sshd is not running
+  [[ -d /run/sshd ]] || "${SUDO[@]}" install -m 0755 -d /run/sshd
+
+  # A broken config would lock us out after the restart, so undo and stop
+  if ! run "Testing SSH config (sshd -t)" "${SUDO[@]}" "$SSHD_BIN" -t; then
+    "${SUDO[@]}" rm -f "$SSHD_DROPIN"
+    fail "Removed $SSHD_DROPIN, SSH was not restarted"
+    record "6. SSH config" "FAILED (config test)"
+    return 1
+  fi
+
+  # Another file (e.g. cloud-init) may still turn password login off
+  local effective
+  effective="$("${SUDO[@]}" "$SSHD_BIN" -T 2>/dev/null)"
+  if [[ "$(awk '$1 == "passwordauthentication" {print $2}' <<<"$effective")" != "yes" ]]; then
+    fail "Password login is still off after the change; another config overrides it:"
+    "${SUDO[@]}" grep -RniE '^[[:space:]]*PasswordAuthentication' \
+      "$SSHD_CONFIG" /etc/ssh/sshd_config.d/ 2>/dev/null || true
+    fail "SSH was not restarted, otherwise the new user could not log in with a password"
+    record "6. SSH config" "FAILED (password login overridden)"
+    return 1
+  fi
+  ok "Password login is on (sshd -T)"
+
+  case "$(awk '$1 == "permitrootlogin" {print $2}' <<<"$effective")" in
+    prohibit-password|without-password) ok "Root login is key-only (sshd -T)" ;;
+    *) warn "PermitRootLogin is overridden by another config, check sshd -T" ;;
+  esac
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    fail "systemctl not found, cannot restart SSH"
+    record "6. SSH config" "FAILED (no systemctl)"
+    return 1
+  fi
+  local svc=ssh
+  systemctl cat ssh.service >/dev/null 2>&1 || svc=sshd
+  if ! run "Restarting SSH ($svc)" "${SUDO[@]}" systemctl restart "$svc"; then
+    record "6. SSH config" "FAILED (restart)"
+    return 1
+  fi
+  record "6. SSH config" "OK"
+  SSH_CONFIGURED=1
 }
 
 # ---------------------------------------------------------------------------
@@ -335,6 +499,13 @@ print_summary() {
   echo "${BOLD}Note:${RESET} to use the new aliases (c, update) in this terminal, run:"
   echo "    source ~/.bashrc"
   echo "or log out and log back in."
+
+  if [[ -n "$NEW_USER" ]]; then
+    echo
+    echo "${BOLD}Note:${RESET} log in as the new user with:"
+    echo "    ssh $NEW_USER@<server-ip>"
+    [[ $SSH_CONFIGURED -eq 1 ]] && echo "Root can now log in with an SSH key only, not with a password."
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -349,6 +520,8 @@ else
   record "2. Install tools" "SKIPPED"
   record "3. bashrc / vimrc" "SKIPPED"
   record "4. Docker" "SKIPPED"
+  record "5. New user" "SKIPPED"
+  record "6. SSH config" "SKIPPED"
   fail "System update failed, stopping here."
   print_summary
   exit 1
@@ -380,6 +553,18 @@ else
 fi
 
 step_docker || EXIT_CODE=1
+
+if step_user; then
+  record "5. New user" "OK ($NEW_USER)"
+  step_ssh || EXIT_CODE=1
+else
+  record "5. New user" "FAILED"
+  # Root password login gets turned off in step 6, so without a working
+  # sudo user that could lock us out of the server
+  warn "Skipping SSH changes because no sudo user is ready"
+  record "6. SSH config" "SKIPPED (no new user)"
+  EXIT_CODE=1
+fi
 
 print_summary
 exit "$EXIT_CODE"
