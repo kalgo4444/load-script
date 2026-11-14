@@ -6,7 +6,8 @@
 #   2. Install basic tools (any tool that fails is skipped)
 #   3. Configure ~/.bashrc and ~/.vimrc
 #   4. Install Docker and make sure it is running
-#   5. Print a summary of what was done
+#   5. Configure SSH in /etc/ssh/sshd_config and restart it
+#   6. Print a summary of what was done
 #
 # Usage:
 #   chmod +x setup-vps
@@ -97,7 +98,7 @@ fi
 # Step 1: Update the system
 # ---------------------------------------------------------------------------
 step_update() {
-  header "Step 1/4: Updating the system"
+  header "Step 1/5: Updating the system"
   run "apt update"       apt_get update       || return 1
   run "apt upgrade"      apt_get upgrade      || return 1
   run "apt full-upgrade" apt_get full-upgrade || return 1
@@ -117,7 +118,7 @@ is_installed() {
 }
 
 step_tools() {
-  header "Step 2/4: Installing tools"
+  header "Step 2/5: Installing tools"
   local t
   for t in "${TOOLS[@]}"; do
     if is_installed "$t"; then
@@ -172,7 +173,7 @@ add_line() {
 }
 
 step_config() {
-  header "Step 3/4: Configuring .bashrc and .vimrc"
+  header "Step 3/5: Configuring .bashrc and .vimrc"
   local bashrc="$TARGET_HOME/.bashrc"
   local vimrc="$TARGET_HOME/.vimrc"
 
@@ -274,7 +275,7 @@ docker_check() {
 }
 
 step_docker() {
-  header "Step 4/4: Installing Docker"
+  header "Step 4/5: Installing Docker"
   if ! detect_docker_distro; then
     fail "Docker setup supports Ubuntu/Debian only. Skipping."
     record "4. Docker" "FAILED (unsupported OS)"
@@ -303,6 +304,129 @@ step_docker() {
     record "4.3 Docker service" "FAILED"
     return 1
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Step 5: Configure SSH in /etc/ssh/sshd_config
+# ---------------------------------------------------------------------------
+SSHD_CONFIG=/etc/ssh/sshd_config
+SSHD_BIN=/usr/sbin/sshd
+SSH_CONFIGURED=0
+
+# Our settings go at the very top of sshd_config, between these markers.
+# sshd keeps the first value it reads, so this wins over the
+# sshd_config.d/*.conf files (e.g. cloud-init) that are included below it.
+SSH_BEGIN="# BEGIN setup-vps"
+SSH_END="# END setup-vps"
+SSH_SETTINGS=(
+  "# root may log in with an SSH key only, not with a password"
+  "PermitRootLogin prohibit-password"
+  "# normal users may log in with a password"
+  "PasswordAuthentication yes"
+  "# SSH key login is enabled"
+  "PubkeyAuthentication yes"
+)
+
+# Print sshd_config with our block at the top. An old block is replaced, and
+# other active lines for the same settings (outside Match blocks) are commented out.
+ssh_render_config() {
+  printf '%s\n' "$SSH_BEGIN" "${SSH_SETTINGS[@]}" "$SSH_END"
+  awk -v begin="$SSH_BEGIN" -v end="$SSH_END" '
+    $0 == begin { skip = 1; next }
+    $0 == end   { skip = 0; next }
+    skip        { next }
+    tolower($1) == "match" { in_match = 1 }
+    {
+      key = tolower($1); sub(/=.*/, "", key)
+      if (!in_match && (key == "permitrootlogin" || key == "passwordauthentication" || key == "pubkeyauthentication")) {
+        print "#" $0 "   # disabled by setup-vps"
+        next
+      }
+      print
+    }
+  ' "$SSHD_CONFIG"
+}
+
+# True if root has at least one SSH key, so it can still log in after the change
+root_has_ssh_key() {
+  "${SUDO[@]}" grep -qE '^[^#[:space:]]' /root/.ssh/authorized_keys 2>/dev/null
+}
+
+step_ssh() {
+  header "Step 5/5: Configuring SSH"
+  if ! is_installed openssh-server; then
+    warn "openssh-server is not installed, skipping"
+    record "5. SSH config" "WARNING (openssh-server not installed)"
+    return 0
+  fi
+
+  # After this step root cannot log in with a password. If we are root and
+  # root has no SSH key, that would lock us out of the server.
+  if [[ "$TARGET_USER" == "root" ]] && ! root_has_ssh_key; then
+    fail "You are root and /root/.ssh/authorized_keys has no key."
+    fail "Root password login would be turned off and lock you out. Add a key or a sudo user first."
+    record "5. SSH config" "SKIPPED (root has no SSH key)"
+    return 1
+  fi
+
+  # One-time backup of the original config
+  if [[ -e "$SSHD_CONFIG.bak" ]]; then
+    ok "Backup already exists: $SSHD_CONFIG.bak"
+  elif ! run "Backing up $SSHD_CONFIG" "${SUDO[@]}" cp -p "$SSHD_CONFIG" "$SSHD_CONFIG.bak"; then
+    record "5. SSH config" "FAILED (backup)"
+    return 1
+  fi
+
+  # Build the new config in a temp file and check it before touching the real one
+  local tmp
+  tmp="$(mktemp)" || { record "5. SSH config" "FAILED (temp file)"; return 1; }
+  if ! ssh_render_config > "$tmp"; then
+    rm -f "$tmp"
+    fail "Could not read $SSHD_CONFIG"
+    record "5. SSH config" "FAILED (read)"
+    return 1
+  fi
+
+  # sshd -t / -T need this directory, which may be missing while sshd is not running
+  [[ -d /run/sshd ]] || "${SUDO[@]}" install -m 0755 -d /run/sshd
+
+  if ! run "Testing new SSH config (sshd -t)" "${SUDO[@]}" "$SSHD_BIN" -t -f "$tmp"; then
+    rm -f "$tmp"
+    fail "$SSHD_CONFIG was not changed"
+    record "5. SSH config" "FAILED (config test)"
+    return 1
+  fi
+
+  local effective
+  effective="$("${SUDO[@]}" "$SSHD_BIN" -T -f "$tmp" 2>/dev/null)"
+  if [[ "$(awk '$1 == "passwordauthentication" {print $2}' <<<"$effective")" != "yes" ]]; then
+    rm -f "$tmp"
+    fail "Password login would still be off; $SSHD_CONFIG was not changed"
+    record "5. SSH config" "FAILED (password login overridden)"
+    return 1
+  fi
+  ok "New config: password login on, root key-only (sshd -T)"
+
+  if ! run "Writing $SSHD_CONFIG" "${SUDO[@]}" cp "$tmp" "$SSHD_CONFIG"; then
+    rm -f "$tmp"
+    record "5. SSH config" "FAILED (write)"
+    return 1
+  fi
+  rm -f "$tmp"
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    fail "systemctl not found, cannot restart SSH"
+    record "5. SSH config" "FAILED (no systemctl)"
+    return 1
+  fi
+  local svc=ssh
+  systemctl cat ssh.service >/dev/null 2>&1 || svc=sshd
+  if ! run "Restarting SSH ($svc)" "${SUDO[@]}" systemctl restart "$svc"; then
+    record "5. SSH config" "FAILED (restart)"
+    return 1
+  fi
+  record "5. SSH config" "OK"
+  SSH_CONFIGURED=1
 }
 
 # ---------------------------------------------------------------------------
@@ -335,6 +459,11 @@ print_summary() {
   echo "${BOLD}Note:${RESET} to use the new aliases (c, update) in this terminal, run:"
   echo "    source ~/.bashrc"
   echo "or log out and log back in."
+
+  if [[ $SSH_CONFIGURED -eq 1 ]]; then
+    echo
+    echo "${BOLD}Note:${RESET} root can now log in over SSH with a key only, not with a password."
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -349,6 +478,7 @@ else
   record "2. Install tools" "SKIPPED"
   record "3. bashrc / vimrc" "SKIPPED"
   record "4. Docker" "SKIPPED"
+  record "5. SSH config" "SKIPPED"
   fail "System update failed, stopping here."
   print_summary
   exit 1
@@ -380,6 +510,7 @@ else
 fi
 
 step_docker || EXIT_CODE=1
+step_ssh    || EXIT_CODE=1
 
 print_summary
 exit "$EXIT_CODE"
