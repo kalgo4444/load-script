@@ -38,3 +38,43 @@ When it finishes, load the new aliases in your current terminal:
 ```bash
 source ~/.bashrc
 ```
+
+## SSH settings (manual)
+
+The script does not change SSH. Do this by hand after it finishes.
+
+> **Before you start:** after this change root can only log in over SSH with a key. Make sure root has a key in `/root/.ssh/authorized_keys`, or that you have another user with `sudo` and a password. Keep your current SSH session open until you have tested a new login.
+
+1. Open `/etc/ssh/sshd_config`:
+
+   ```bash
+   sudo vim /etc/ssh/sshd_config
+   ```
+
+   Set these three lines (remove the `#` in front if they are commented out):
+
+   ```
+   PermitRootLogin prohibit-password
+   PasswordAuthentication yes
+   PubkeyAuthentication yes
+   ```
+
+   | Setting | Meaning |
+   | --- | --- |
+   | `PermitRootLogin prohibit-password` | root may log in with an SSH key only, not with a password |
+   | `PasswordAuthentication yes` | normal users may log in with a password |
+   | `PubkeyAuthentication yes` | SSH key login is enabled |
+
+## Close Dokploy port 3000 (manual)
+
+Only for servers that run [Dokploy](https://dokploy.com). The script does not install it.
+
+By default the Dokploy dashboard is open on `http://<server-ip>:3000`. Once you have set a domain for the dashboard in Dokploy and it opens over that domain, remove the public port 3000:
+
+```bash
+docker service update --publish-rm "published=3000,target=3000,mode=host" dokploy
+```
+
+> **Before you run it:** check that the dashboard opens on your domain. After this command, `http://<server-ip>:3000` stops working, and the domain is the only way into the dashboard.
+
+Use `sudo` in front if your user is not in the `docker` group.
