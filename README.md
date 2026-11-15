@@ -1,7 +1,3 @@
-# load-script
-
-`setup-vps` sets up a fresh Ubuntu/Debian VPS in one run.
-
 ## What it does
 
 1. Updates the system
@@ -11,8 +7,6 @@
 5. Prints a summary
 
 ## Usage
-
-Needs root or a user with `sudo`.
 
 ```bash
 curl -fsSL -o setup-vps https://raw.githubusercontent.com/kalgo4444/load-script/main/setup-vps
@@ -47,7 +41,7 @@ sudo ufw --force enable
 sudo ufw status verbose
 ```
 
-**Dokploy port 3000** (only if you run [Dokploy](https://dokploy.com)): once the dashboard opens on your domain, close the public port. After this, the domain is the only way in.
+**Dokploy port 3000**
 
 ```bash
 docker service update --publish-rm "published=3000,target=3000,mode=host" dokploy
