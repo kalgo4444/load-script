@@ -4,7 +4,7 @@
 #
 #   1. Update the system
 #   2. Install basic tools (any tool that fails is skipped)
-#   3. Configure ~/.bashrc and ~/.vimrc
+#   3. Configure ~/.bashrc
 #   4. Install Docker and make sure it is running
 #   5. Print a summary of what was done
 #
@@ -66,7 +66,7 @@ else
   SUDO=(sudo)
 fi
 
-# Whose ~/.bashrc and ~/.vimrc to edit (the real user, even under sudo)
+# Whose ~/.bashrc to edit (the real user, even under sudo)
 TARGET_USER="${SUDO_USER:-$(id -un)}"
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 [[ -z "$TARGET_HOME" ]] && TARGET_HOME="$HOME"
@@ -107,7 +107,7 @@ step_update() {
 # ---------------------------------------------------------------------------
 # Step 2: Install tools (skip any that are missing or fail)
 # ---------------------------------------------------------------------------
-TOOLS=(curl wget unzip git htop neofetch ufw vim ca-certificates tmux fail2ban)
+TOOLS=(curl wget git htop neofetch ufw vim ca-certificates fail2ban)
 TOOLS_INSTALLED=()
 TOOLS_ALREADY=()
 TOOLS_SKIPPED=()
@@ -159,7 +159,7 @@ fail2ban_check() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 3: Configure ~/.bashrc and ~/.vimrc
+# Step 3: Configure ~/.bashrc
 # ---------------------------------------------------------------------------
 # Add a line to a file only if it is not already there
 add_line() {
@@ -172,9 +172,8 @@ add_line() {
 }
 
 step_config() {
-  header "Step 3/4: Configuring .bashrc and .vimrc"
+  header "Step 3/4: Configuring .bashrc"
   local bashrc="$TARGET_HOME/.bashrc"
-  local vimrc="$TARGET_HOME/.vimrc"
 
   info "Writing aliases to $bashrc"
   touch "$bashrc" || return 1
@@ -182,14 +181,9 @@ step_config() {
   add_line "$bashrc" 'alias c="clear"'
   add_line "$bashrc" 'alias update="sudo apt update && sudo apt upgrade && sudo apt full-upgrade && sudo apt autoremove"'
 
-  info "Writing settings to $vimrc"
-  touch "$vimrc" || return 1
-  add_line "$vimrc" 'set number'
-  add_line "$vimrc" 'syntax on'
-
-  # If run with sudo, give the files back to the real user
+  # If run with sudo, give the file back to the real user
   if [[ $EUID -eq 0 && -n "$SUDO_USER" ]]; then
-    chown "$TARGET_USER": "$bashrc" "$vimrc"
+    chown "$TARGET_USER": "$bashrc"
   fi
 
   info "Reloading $bashrc"
@@ -347,7 +341,7 @@ if step_update; then
 else
   record "1. System update" "FAILED"
   record "2. Install tools" "SKIPPED"
-  record "3. bashrc / vimrc" "SKIPPED"
+  record "3. bashrc" "SKIPPED"
   record "4. Docker" "SKIPPED"
   fail "System update failed, stopping here."
   print_summary
@@ -373,9 +367,9 @@ else
 fi
 
 if step_config; then
-  record "3. bashrc / vimrc" "OK"
+  record "3. bashrc" "OK"
 else
-  record "3. bashrc / vimrc" "FAILED"
+  record "3. bashrc" "FAILED"
   EXIT_CODE=1
 fi
 
