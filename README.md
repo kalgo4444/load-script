@@ -12,7 +12,7 @@
 curl -fsSL -o setup-vps https://raw.githubusercontent.com/kalgo4444/load-script/main/setup-vps
 chmod +x setup-vps
 ./setup-vps
-source ~/.bashrc   # load the new aliases
+source ~/.bashrc
 ```
 
 ## Manual steps
